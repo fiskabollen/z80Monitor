@@ -1,8 +1,10 @@
 # Introduction
 
-The ARSE (Advanced Rigid Solderless Experiment) is a general purpose 8-bit computer capable of being programmed and operated interactively through a USB port by a serial terminal or terminal emulator. It can be programmed to operate autonomously through the USB port. The boot ROM is switchable between the system ROM and the user-programmable EEPROM. Alternative ROMs could also be substituted for the system ROM and second ROM, although this is not recommended as it could lead to loss of control of your ARSE.
+The ARSE (Advanced Rigid Solderless Experiment) is a general purpose homebrew 8-bit computer built from a Z80 CPU. It is aimed to be a minimum design for a working general purpose computer.
 
-Your ARSE has two EEPROMs to allow storage of your own programs and data, but also to allow bootstrapping if you wish to modify the system software. There are some system routines available which are summarised in the relevant section.
+The ARSE is capable of being programmed and operated interactively through a USB port by a serial terminal or terminal emulator. It can be programmed to operate autonomously through the USB port. The boot ROM is switchable between the system ROM and the user-programmable EEPROM. Alternative ROMs could also be substituted for the system ROM and second ROM, although this is not recommended as it could lead to loss of control of your ARSE.
+
+Your ARSE has two EEPROMs to allow storage of your own programs and data, but also to allow bootstrapping if you wish to modify the system software. There are some system routines available which are summarised in the relevant section of the documentation.
 
 # Specification
 
@@ -20,7 +22,7 @@ Your ARSE has two EEPROMs to allow storage of your own programs and data, but al
 
 # Operation - Basic User Manual (BUM)
 
-This section comprises a Basic User Manual or BUM. The BUM is designed to facilitate use of your ARSE and the operating sotware - ARSEOS.
+This section comprises a Basic User Manual or BUM. The BUM is designed to facilitate use of your ARSE and the operating software - 'ARSEos'.
 
 ## ROM switch
 
@@ -36,9 +38,9 @@ On reset, if `ROM0` is selected as boot ROM then the ARSE will output the ARSEOS
 
 All text input and output is via the USB port at 19,200 BAUD (bits per second). The ARSE can be operated and programmed using a suitable terminal emulator on a personal computer; for example puTTY.
 
-## The ARSEOS Monitor
+## The ARSEos Monitor
 
-The ARSEOS Monitor consists of basic functionality to enable rudimentary monitoring and programming of your ARSE. The Monitor consists of a basic command mode with each command activated by a single character input from the UART and a corresponding display of characters. On initialisation, the Monitor displays the Monitor Main Menu followed by the memory location status showing the currently selected memory location which will be $0000 at initialisation and the contents of that memory location in hexadecimal followed by the ASCII character for that code, if applicable.
+The ARSEos Monitor consists of basic functionality to enable rudimentary monitoring and programming of your ARSE. The Monitor consists of a basic command mode with each command activated by a single character input from the UART and a corresponding display of characters. On initialisation, the Monitor displays the Monitor Main Menu followed by the memory location status showing the currently selected memory location which will be $0000 at initialisation and the contents of that memory location in hexadecimal followed by the ASCII character for that code, if applicable.
 
 The Monitor will allow the user to display, dump, set and execute any address. It will also allow copy of any length from one address to another.
 
@@ -81,7 +83,7 @@ The displayed line is in the following format:
 |------------ Current address
      |-------------- hexadecimal contents of address
         |---------------- hexadecimal contents of address+1
-ASCII character for each memory location ----------------|
+ASCII character for each memory location ----------------------|
 ```
 
 The dump function will continually output lines of 16 memory locations until a key is pressed (ie. a character is received through the UART). The dump function does not alter the current address.
@@ -129,6 +131,7 @@ exec [aaaa]
 ```
 
 and wait for a character. Any character recieved other than return will abort and return you to Memory Location Status Display. Sending return will transfer execution to the instruction at the current address.
+Be careful! - your ARSE will simply start executing instructions at the current address; you are most likely leaving ARSEos at this point.
 
 # TODO
 
