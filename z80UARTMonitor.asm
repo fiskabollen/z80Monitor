@@ -1,7 +1,5 @@
 ;
 ; Simple monitor on UART
-; Max Francis 2012
-; $Id: UARTmonitor.asm,v 1.18 2012/05/20 08:51:17 mfrancis Exp $
 ;
 ;  Current address is in HL
 ;  Display [nnnn] bb (A)
@@ -17,19 +15,14 @@
 ; S (capital) enters set mode: hex input fills memory until <enter> or <ESC>
 ; X (capital) executes from current
 ; h <enter> display this help
-; any errors dislpays '?'
+; any errors dislpays '?'",$0A,$0D
 ;
 ; Memory Map is
-; 0000-3FFF	first ROM (probably though only 4k or 8k chip)
+; 0000-3FFF	16K ROM (probably though only 4k or 8k chip)
 ; 4000-7FFF space for 16K of memory (ROM or RAM)
 ; 8000-FFFF 32K RAM
-;
-; TODO
-; Add CALL (current address)
 
 
-; SYMBOLIC DEFINES
-; $8x selects the UART addressing lines
 UART_PORT	equ 80h	; The UART's data buffer for in/out
 UART_DLL	equ	80h	; LSB of divisor latch
 UART_DLM	equ 81h	; MSB of divisor latch (DLAB=1)
@@ -39,7 +32,6 @@ UART_LCR	equ	83h	; Line Control Register
 UART_MCR	equ 84h	; Modem Control Register (for OUT1/OUT2)
 UART_LSR	equ	85h	; Line Status Register (used for transmitter empty bit)
 
-; Control the OUT ports of the UART, these are connected to LEDs
 UART_O1	equ	00000100b ; bit 2 is OUT1
 UART_O2	equ 00001000b ; bit 3 is OUT2
 
@@ -50,20 +42,18 @@ A_FF		equ	0Ch
 A_ESC		equ 1Bh
 A_DEL		equ 7Fh
 
-RAMTOP		equ	$FFFF   ;	RAM ends at $FFFF
-TEMP      equ RAMTOP  ; Temporary storage byte
-KDATA1		equ TEMP-1  ;	keyed input for addresses
+RAMTOP		equ	$FFFF	;	RAM ends at $FFFF
+TEMP		equ RAMTOP	; 	Temporary storage byte
+KDATA1		equ TEMP-1	;	keyed input for addresses
 KDATA2		equ KDATA1-1
-BUFFER		equ	KDATA2-256  ; for building strings - 256 bytes
-STACK		  equ BUFFER-1    ; then we have the stack
+BUFFER		equ	KDATA2-256	; for building strings - 256 bytes
+STACK		equ BUFFER-1	; then we have the stack
 	
-	; Our ROM starts at 0000; that is where the z80 starts executing
 	org 0
 	
 	LD SP,STACK
 
 init:
-  ; HL stores our user address pointer
 	LD HL,0000h
 	
 ; Set OUT2 indicator LED to off
@@ -76,37 +66,34 @@ init:
 ;; INITIALISE THE UART
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Reset Divisor Latch Access Bit
-	XOR A
+	LD A,0h
 	OUT (UART_LCR), A
-; Enable FIFO (buffer for in/out)
-	LD A, 00000111b	; bit 0 = enable FIFOs, and clear the FIFOs, set trigger level
-	OUT (UART_FCR), A
 ; Reset Interrupt Enable Register bits (we need FIFO polled mode)
 	OUT (UART_IER), A
+; Enable FIFO (buffer for in/out)
+	LD A, 00000001b	; bit 0 = enable FIFOs
+	OUT (UART_FCR), A
 ; Set Divisor Latch Access Bit (to set baud rate)
 	LD A,10000000b	; bit 7 is DLAB
 	OUT (UART_LCR), A
-; Set divisor (19200 baud for 1.8432Mhz clock) = $06
-	LD A, 06h
+; Set divisor (38400 baud for 1.8432Mhz clock) = $03
+	LD A, 03h
 	OUT (UART_DLL), A	; DLL (LSB)
-	XOR A
+	LD A, 00h
 	OUT (UART_DLM), A	; DLM (MSB)
 ; Set 8N1   (DLE to 0)
-	LD A, 00000011b	; This is 8N1, plus clear the DLA bit
+	LD A, 00000011b	; This is 8N1, plus clear DLA bit
 	OUT (UART_LCR), A
-
 
 start:
 ; Output the startup text
 	LD DE, TEXT0
 	CALL otext
 	
-; Output the current address indicator: [nnnn] bb (A)
-;   nnnn is hex address, bb is hex byte at that address, A is ascii of the byte
+; Output the current location [nnnn] bb (A)
 display:
-; Toggle OUT1 to show display loop
-	CALL toggle1
-	
+; Turn on LED1 to show display loop
+	CALL on1		; turn on LED1 to show busy
 	CALL dispadd	; Display [nnnn]
 	LD A, ' '
 	CALL outchar
@@ -150,6 +137,10 @@ L2:	CP 'h'			; h: show help then display
 	JP Z, list
 	CP 'S'			; S: enter write mode (set)
 	JP Z, set
+	CP 'k'			; k: bulk set memory
+	JP Z, bulkset
+	CP 't'			; t: type ascii to memory
+	JP Z, typemem
 	CP 'X'			; X: execute from current
 	JP Z, exec
 	CP 30h			; test for hex digit
@@ -162,7 +153,7 @@ L2:	CP 'h'			; h: show help then display
 T1:	CP 41h			; AND
 	JR C, notdig	; < $41
 digit:
-	CALL fourcar	; four hex character address entry
+	CALL fourcar	; <hexdigit>: address entry
 	JP display
 notdig:
 	LD A, '?'		; no other commands, output '?'
@@ -186,11 +177,11 @@ set:
 	
 	CALL twocar		; two character input and set (HL)
 	CALL OUTCRLF	; new line
-	LD A, D			; D contains $FF if we aborted
+	LD A, B			; B contains $FF if we aborted
 	CP $FF
-	JP NZ, setrep	
-	JP display		; abort - go to display
-setrep:
+	JP NZ, setend	; abort - go to display
+	JP display	
+setend:
 	INC HL			; else next address and loops
 	JP set
 	
@@ -248,7 +239,7 @@ skip:
 	INC HL
 	INC IX
 	DEC B
-	XOR A
+	LD A, 0
 	CP B
 	JP NZ, loop16
 	
@@ -278,18 +269,18 @@ copy:
 	PUSH HL
 	PUSH DE
 	PUSH BC
-	LD DE, CPTXT1	; "Copy: From"
+	LD DE, CPTXT1	; Copy: From
 	CALL otext
 	
 	LD A, $30		; start fourcar with [0000]
 	CALL fourcar
 	LD (BUFFER), HL
-	LD DE, CPTXT2	; "To:"
+	LD DE, CPTXT2	; To:
 	CALL otext
 	LD A, $30		; start fourcar with [0000]
 	CALL fourcar
 	LD (BUFFER+2), HL
-	LD DE, CPTXT3	; "Length:"
+	LD DE, CPTXT3	; Length:
 	CALL otext
 	LD A, $30		; start fourcar with [0000]
 	CALL fourcar
@@ -298,7 +289,7 @@ copy:
 	LD HL, (BUFFER)
 	CALL eLDIR
 	
-	LD DE, DONETXT	; "Done"
+	LD DE, DONETXT	; Done
 	CALL otext
 	POP BC
 	POP DE
@@ -310,7 +301,6 @@ copy:
 ;;   exits on <ret> or <esc>
 ;;   HL contains the address input on return
 ;;   or HL remains unchanged on abort
-;;   Use KDATA1 and KDATA2 to store entered digits
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 fourcar:
 		PUSH AF
@@ -321,7 +311,7 @@ fourcar:
 		LD L, A
 		LD H, 00h
 		LD (KDATA2), A	; start with the digit we were given
-		XOR A
+		LD A, 0
 		LD (KDATA1), A
 		; Output [nnnn] then one backspace
 		CALL dispadd
@@ -363,25 +353,23 @@ fcabort:
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; TWO CHARACTER ROLLING INPUT ROUTINE, exits on <esc> or <ret>
 ;;   sets (HL) to A and returns
-;;   on <esc> set (HL) to original value, write FF to D and return
+;;   on <esc> set (HL) to original value, write FF to A and return
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 twocar:
 		PUSH HL
 		; Output [00] then one backspace
 		LD A, '['
 		CALL outchar
-		; Save old value of (HL) and use as default
-		LD A, (HL)
-		LD B, A			; save the old value in B
-		CALL hexout		; use as default
+		LD A, '0'
+		CALL outchar
+		CALL outchar
 		LD A, ']'
 		CALL outchar
 		LD A, A_BS
-		CALL outchar	; one backspace
-		
-		LD D, 0			; D is set to $FF on abort
+		CALL outchar
+		LD B, (HL)		; save the old contents for <esc>
 		LD HL, KDATA1
-		LD (HL), B		; default to old value
+		LD (HL), 0
 tcloop:
 		; Output 2 backspaces
 		LD A, A_BS
@@ -403,7 +391,7 @@ tcloop:
 tcabort:
 		LD A, B		; <esc>: so restore A
 		LD (KDATA1), A
-		LD D, $FF	; Use $FF in D to indicate an abort
+		LD B, $FF	; Use $FF in B to indicate an abort
 tcend:	POP HL
 		LD A, (KDATA1)
 		LD (HL), A	; set (HL) to KDATA1
@@ -497,7 +485,7 @@ ldend:	POP AF
 		
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; CONFWR - Write to address with confirm, returns when complete
-;;  Used for writing to EEPROM
+;;          used for writign to EEPROM
 ;;  This will hang the computer if write does not succeed
 ;; byte to write is in A
 ;; address to write is HL
@@ -559,9 +547,7 @@ otext:
 		PUSH AF
 otloop:	LD A, (DE)
 		CP A, $80		; $80 means end of text
-		JP Z, otend	
-		CP A, $00		; So does 0
-		JP Z, otend
+		JP Z, otend		
 		CALL outchar	; output the byte in A
 		INC DE			; point to next
 		JP otloop
@@ -597,8 +583,23 @@ toggle2:
 		OUT (UART_MCR), A
 		POP AF
 		RET
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+;; Turn on or off LED 1
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+on1:
+		PUSH AF
+		LD A, 1
+		OUT (UART_MCR), A
+		POP AF
+		RET
+off1:	
+		PUSH AF
+		LD A, 0
+		OUT (UART_MCR), A
+		POP AF
+		RET
 
-;; Lookup table for ASCII values of hex digits
+
 DATA:
 		DEFB	30h	; 0
 		DEFB	31h	; 1
@@ -616,19 +617,20 @@ DATA:
 		DEFB	44h	; D
 		DEFB	45h	; E
 		DEFB	46h	; F
-		
-;; The help menu text
+	
 TEXT0:
-	DEFM	"Mon $Revision: 1.18 $",$0A,$0D
-	DEFM	"<spc>:disp",$0A,$0D
-	DEFM	"[0-9A-F]:address (<esc> abort)",$0A,$0D
-	DEFM	"<ent>:inc, <bs>:dec",$0A,$0D
-	DEFM	"l:list+inc16",$0A,$0D
-	DEFM	"d:dump (key ends)",$0A,$0D
-	DEFM	"c:copy (length=0 abort)",$0A,$0D
-	DEFM	"S:set (<ent>:set+inc <esc>:end)",$0A,$0D
-	DEFM	"X:exec",$0A,$0D
-	DEFM	"h:help",$0A,$0D
+	DEFM	"Mon $Revision: 1.17 $",$0A,$0D
+	DEFM	"<spc>: display address",$0A,$0D
+	DEFM	"[0-9A-F]: enter address (<esc> abort)",$0A,$0D
+	DEFM	"<ent>: inc address, <bs>:dec address",$0A,$0D
+	DEFM	"l: list+inc 16",$0A,$0D
+	DEFM	"d: dump at address (any key ends)",$0A,$0D
+	DEFM	"S: set at address (<ent>:set+inc <esc>:end)",$0A,$0D
+	DEFM	"X: exec address (caution!)",$0A,$0D
+	DEFM	"c: copy... (length=0 to abort)",$0A,$0D
+	DEFM	"k: bulk set...",$0A,$0D
+	DEFM	"t: type ascii to mem...",$0A,$0D
+	DEFM	"h: this help",$0A,$0D
 	DEFB	$80
 
 SETTXT:
@@ -638,12 +640,130 @@ EXTXT:
 	DEFM	"exec ",$80
 	
 CPTXT1:
-	DEFM	"copy fr:",$80
+	DEFM	"copy from:",$80
 CPTXT2:
 	DEFM	"to:", $80
 CPTXT3:
-	DEFM	"len:",$80
+	DEFM	"length:",$80
 
 DONETXT:
-	DEFM	"OK",$0A,$0D,$80
+	DEFM	"Done.",$0A,$0D,$80
 	
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Additional routines
+;; April 2015
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Call address in HL
+;; Works by putting 'display' on the stack
+;; destroys DE
+callhl:
+	LD DE, EXTXT	; confirmation text
+	CALL otext
+	CALL dispadd
+	CALL OUTCRLF
+	CALL inchar
+	CP A_CR			; <ret> we continue, else abort
+	JP NZ, xabort	; xabort jumps to display
+	
+	LD DE, display
+	PUSH DE
+	PUSH HL
+	RET
+
+
+;; Bulk memory set, continuous entry
+;; designed to take paste from clipboard
+;; of continual hex stream
+;; starts from HL until <esc>
+bulkset:
+	PUSH DE
+	LD DE, bstxt
+	CALL otext
+	
+	; ask for address -> HL
+	XOR A
+	CALL fourcar
+	
+	LD DE, bstxt1
+	CALL otext
+	
+bkdigit:	
+	; Digit 1
+	CALL inchar
+	CP A_ESC
+	JR Z, bsabort
+	CALL outchar	; echo the character
+	CALL ATOHEX		; convert to binary
+	RLD				; move into (HL) lower nybble
+
+	; Digit 2
+	CALL inchar
+	CALL outchar	; echo the character
+	CALL ATOHEX		; convert to binary
+	RLD				; shift (HL) and move into lower nybble
+	
+	INC HL
+	JR 	bkdigit
+	
+bsabort:
+	LD DE, DONETXT
+	CALL otext
+	POP DE
+	JP	display
+bstxt:
+	DEFM "Bulk load to: ",$80
+bstxt1:
+	DEFM "Ready (<esc> to end): ",$80
+	
+	
+;; Type ascii values to memory, <esc> exits
+typemem:
+	PUSH DE
+	LD DE, tmtxt
+	CALL otext
+
+	; ask for address -> HL
+	XOR A			; zero A as first digit of fourchar
+	CALL fourcar	; set HL as per user entry
+
+	LD DE, bstxt1
+	CALL otext
+
+tmloop:
+	CALL inchar
+	LD (HL), A
+	INC HL
+	CALL outchar
+	CP A_ESC		; escape
+	JR NZ, tmloop
+
+	LD HL, DE
+	POP DE
+	JP display
+tmtxt:
+	DEFM "Type ascii to: ",$80
+	
+
+;; Set memory range to value in A
+;; From HL, length in BC
+SETMEM:
+	PUSH DE
+	LD D, A
+smloop:
+	LD A, B		; Test BC for zero first
+	OR C
+	JR Z, smend		
+	LD A, D
+	CALL CONFWR
+	INC HL
+	DEC BC
+	JR smloop
+smend:	
+	LD DE, DONETXT
+	CALL otext
+	POP DE
+	JP display
+
+txt:	DEFM "Fin.",$0D,$0A,$80
