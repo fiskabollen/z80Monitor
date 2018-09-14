@@ -36,7 +36,8 @@ On reset, if `ROM0` is selected as boot ROM then the ARSE will output the ARSEOS
 
 ## Input / Output
 
-All text input and output is via the USB port at 19,200 BAUD (bits per second). The ARSE can be operated and programmed using a suitable terminal emulator on a personal computer; for example puTTY.
+All text input and output is via the USB port at 38400 BAUD (bits per second). The ARSE can be operated and programmed using a suitable terminal emulator on a personal computer; for example puTTY or screen:
+On a Mac: `screen /dev/cu.SLAB_USBtoUART 38400`
 
 ## The ARSEos Monitor
 
