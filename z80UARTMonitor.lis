@@ -1,90 +1,972 @@
-Error in file: z80UARTMonitor.asm  Line: 45
-undefined symbol
+                        ; --------------------------------------
+                        ; zasm: assemble "z80UARTMonitor.asm"
+                        ; date: 2018-09-14 20:38:42
+                        ; --------------------------------------
 
-Error in file: z80UARTMonitor.asm  Line: 230
-illegal operand
 
-Error in file: z80UARTMonitor.asm  Line: 287
-illegal operand
+                        ;
+                        ; Simple monitor on UART
+                        ;
+                        ;  Current address is in HL
+                        ;  Display [nnnn] bb (A)
+                        ;          nnnn is current address, bb is hex byte, A is ASCII char
+                        ;  Input:
+                        ; <space> displays current byte
+                        ; [0-9,A-F] enters current address
+                        ; <enter> increments current address (loops through FFFF)
+                        ; <backspace> decrements current address (loops through 0000)
+                        ; l lists 16 locations, update current
+                        ; d dumps a grid of memory from current until keypress
+                        ; c copies memory: requesting from, to and length
+                        ; S (capital) enters set mode: hex input fills memory until <enter> or <ESC>
+                        ; X (capital) executes from current
+                        ; h <enter> display this help
+                        ; any errors dislpays '?'",$0A,$0D
+                        ;
+                        ; Memory Map is
+                        ; 0000-3FFF	16K ROM (probably though only 4k or 8k chip)
+                        ; 4000-7FFF space for 16K of memory (ROM or RAM)
+                        ; 8000-FFFF 32K RAM
+                        
+                        
+0080:                   UART_PORT	equ 80h	; The UART's data buffer for in/out
+0080:                   UART_DLL	equ	80h	; LSB of divisor latch
+0081:                   UART_DLM	equ 81h	; MSB of divisor latch (DLAB=1)
+0082:                   UART_FCR	equ	82h	; FIFO control register
+0081:                   UART_IER	equ	81h	; Interrupt Enable register (DLAB=0)
+0083:                   UART_LCR	equ	83h	; Line Control Register
+0084:                   UART_MCR	equ 84h	; Modem Control Register (for OUT1/OUT2)
+0085:                   UART_LSR	equ	85h	; Line Status Register (used for transmitter empty bit)
+                        
+0004:                   UART_O1	equ	00000100b ; bit 2 is OUT1
+0008:                   UART_O2	equ 00001000b ; bit 3 is OUT2
+                        
+000D:                   A_CR		equ	0Dh		; Carriage Return ASCII
+000A:                   A_LF		equ 0Ah		; Line Feed ASCII
+0008:                   A_BS		equ	08h		; Backspace
+000C:                   A_FF		equ	0Ch
+001B:                   A_ESC		equ 1Bh
+007F:                   A_DEL		equ 7Fh
+                        
+FFFF:                   RAMTOP		equ	$FFFF	;	RAM ends at $FFFF
+FFFF:                   TEMP		equ RAMTOP	; 	Temporary storage byte
+FFFE:                   KDATA1		equ TEMP-1	;	keyed input for addresses
+FFFD:                   KDATA2		equ KDATA1-1
+FEFD:                   BUFFER		equ	KDATA2-256	; for building strings - 256 bytes
+FEFC:                   STACK		equ BUFFER-1	; then we have the stack
+                        	
+0000:                   	org 0
+                        	
+0000: 31FCFE   [10]     	LD SP,STACK
+                        
+0003:                   init:
+0003: 210000   [10]     	LD HL,0000h
+                        	
+                        ; Set OUT2 indicator LED to off
+                        ; This shows we have started at least
+0006: DB84     [21]     	IN A,(UART_MCR)
+0008: F608     [28]     	OR UART_O2	
+000A: D384     [39]     	OUT (UART_MCR),A
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; INITIALISE THE UART
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ; Reset Divisor Latch Access Bit
+000C: 3E00     [46]     	LD A,0h
+000E: D383     [57]     	OUT (UART_LCR), A
+                        ; Reset Interrupt Enable Register bits (we need FIFO polled mode)
+0010: D381     [68]     	OUT (UART_IER), A
+                        ; Enable FIFO (buffer for in/out)
+0012: 3E01     [75]     	LD A, 00000001b	; bit 0 = enable FIFOs
+0014: D382     [86]     	OUT (UART_FCR), A
+                        ; Set Divisor Latch Access Bit (to set baud rate)
+0016: 3E80     [93]     	LD A,10000000b	; bit 7 is DLAB
+0018: D383     [104]    	OUT (UART_LCR), A
+                        ; Set divisor (38400 baud for 1.8432Mhz clock) = $03
+001A: 3E03     [111]    	LD A, 03h
+001C: D380     [122]    	OUT (UART_DLL), A	; DLL (LSB)
+001E: 3E00     [129]    	LD A, 00h
+0020: D381     [140]    	OUT (UART_DLM), A	; DLM (MSB)
+                        ; Set 8N1   (DLE to 0)
+0022: 3E03     [147]    	LD A, 00000011b	; This is 8N1, plus clear DLA bit
+0024: D383     [158]    	OUT (UART_LCR), A
+                        
+0026:                   start:
+                        ; Output the startup text
+0026: 111603   [10]     	LD DE, TEXT0
+0029: CDC902   [27]     	CALL otext
+                        	
+                        ; Output the current location [nnnn] bb (A)
+002C:                   display:
+                        ; Turn on LED1 to show display loop
+002C: CDF802   [17]     	CALL on1		; turn on LED1 to show busy
+002F: CD4102   [34]     	CALL dispadd	; Display [nnnn]
+0032: 3E20     [41]     	LD A, ' '
+0034: CDBD02   [58]     	CALL outchar
+0037: CDBD02   [75]     	CALL outchar
+003A: 7E       [82]     	LD A, (HL)
+003B: CD5402   [99]     	CALL hexout
+003E: 3E20     [106]    	LD A, ' '
+0040: CDBD02   [123]    	CALL outchar
+0043: 3E28     [130]    	LD A, '('
+0045: CDBD02   [147]    	CALL outchar
+0048: 7E       [154]    	LD A, (HL)
+0049: CDBD02   [171]    	CALL outchar
+004C: 3E29     [178]    	LD A, ')'
+004E: CDBD02   [195]    	CALL outchar
+0051: CDD902   [212]    	CALL OUTCRLF
+                        	
+0054:                   inloop:
+0054: CDA602   [17]     	CALL inchar			; wait for input
+0057: 010000   [27]     	LD BC, 0			; C is used
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; SELECT BASED ON INPUT CHAR
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+005A: FE20     [34]     	CP ' '			; <space>: display
+005C: CA2C00   [44|44]  	JP Z, display
+005F: FE0D     [51]     	CP A_CR			; <CR>: increment and display
+0061: C26800   [61|61]  	JP NZ, L1
+0064: 23       [67]     	INC HL
+0065: C32C00   [77]     	JP display
+0068: FE7F     [ 7]     L1:	CP A_DEL		; backspace: decrement and display
+006A: C27100   [17|17]  	JP NZ, L2
+006D: 2B       [23]     	DEC HL
+006E: C32C00   [33]     	JP display
+0071: FE68     [ 7]     L2:	CP 'h'			; h: show help then display
+0073: CA2600   [17|17]  	JP Z, start
+0076: FE63     [24]     	CP 'c'			; c: copy memory
+0078: CA5501   [34|34]  	JP Z, copy
+007B: FE64     [41]     	CP 'd'			; d: dump until keypress
+007D: CAFC00   [51|51]  	JP Z, dump
+0080: FE6C     [58]     	CP 'l'			; l: list 16 locations
+0082: CAFA00   [68|68]  	JP Z, list
+0085: FE53     [75]     	CP 'S'			; S: enter write mode (set)
+0087: CAC000   [85|85]  	JP Z, set
+008A: FE6B     [92]     	CP 'k'			; k: bulk set memory
+008C: CAAA04   [102|102]	JP Z, bulkset
+008F: FE74     [109]    	CP 't'			; t: type ascii to memory
+0091: CA0805   [119|119]	JP Z, typemem
+0094: FE58     [126]    	CP 'X'			; X: execute from current
+0096: CAE100   [136|136]	JP Z, exec
+0099: FE30     [143]    	CP 30h			; test for hex digit
+009B: DAB500   [153|153]	JP C, notdig	; < $30
+009E: FE47     [160]    	CP 47h			
+00A0: D2B500   [170|170]	JP NC, notdig	; >= $47
+00A3: FE3A     [177]    	CP 3Ah
+00A5: D2AB00   [187|187]	JP NC, T1		; >= $3A
+00A8: C3AF00   [197]    	JP digit
+00AB: FE41     [ 7]     T1:	CP 41h			; AND
+00AD: 3806     [14|19]  	JR C, notdig	; < $41
+00AF:                   digit:
+00AF: CD9701   [17]     	CALL fourcar	; <hexdigit>: address entry
+00B2: C32C00   [27]     	JP display
+00B5:                   notdig:
+00B5: 3E3F     [ 7]     	LD A, '?'		; no other commands, output '?'
+00B7: CDBD02   [24]     	CALL outchar
+00BA: CDD902   [41]     	CALL OUTCRLF
+00BD: C32C00   [51]     	JP display
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; SET
+                        ;;   output SET [aaaa] [nn] where nn is current contents
+                        ;;   call two character input to set (HL)
+                        ;;   increment HL
+                        ;;   repeat until <esc>
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+00C0:                   set:
+00C0: 116604   [10]     	LD DE, SETTXT
+00C3: CDC902   [27]     	CALL otext
+00C6: CD4102   [44]     	CALL dispadd
+00C9: 3E20     [51]     	LD A, ' '
+00CB: CDBD02   [68]     	CALL outchar
+                        	
+00CE: CDF601   [85]     	CALL twocar		; two character input and set (HL)
+00D1: CDD902   [102]    	CALL OUTCRLF	; new line
+00D4: 78       [106]    	LD A, B			; B contains $FF if we aborted
+00D5: FEFF     [113]    	CP $FF
+00D7: C2DD00   [123|123]	JP NZ, setend	; abort - go to display
+00DA: C32C00   [133]    	JP display	
+00DD:                   setend:
+00DD: 23       [ 6]     	INC HL			; else next address and loops
+00DE: C3C000   [16]     	JP set
+                        	
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; EXECUTE
+                        ;;    execute from HL
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+00E1:                   exec:
+00E1: 116B04   [10]     	LD DE, EXTXT	; confirmation text
+00E4: CDC902   [27]     	CALL otext
+00E7: CD4102   [44]     	CALL dispadd
+00EA: CDD902   [61]     	CALL OUTCRLF
+                        	
+00ED: CDA602   [78]     	CALL inchar
+00F0: FE0D     [85]     	CP A_CR			; <ret> we continue, else abort
+00F2: C2F700   [95|95]  	JP NZ, xabort	
+00F5: E5       [106]    	PUSH HL
+00F6: C9       [116]    	RET
+00F7:                   xabort:
+00F7: C32C00   [10]     	JP display
+                        	
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; LIST - LIST 16 LOCATIONS, SETTING HL
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+00FA:                   list:
+00FA: 0EFF     [ 7]     	LD C, $FF		; Use C=$FF to do one cycle of dump
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; DUMP - dump memory from current location until keypress
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+00FC:                   dump:
+00FC: 7C       [ 4]     	LD A, H
+00FD: CD5402   [21]     	CALL hexout
+0100: 7D       [25]     	LD A, L
+0101: CD5402   [42]     	CALL hexout
+                        	
+0104: 3E20     [49]     	LD A, ' '
+0106: CDBD02   [66]     	CALL outchar
+0109: CDBD02   [83]     	CALL outchar
+                        
+010C: 0610     [90]     	LD B, 16
+010E: DD21FDFE [104]    	LD IX, BUFFER		; Build string of ASCII values at TEMP
+0112:                   loop16:	
+0112: 7E       [ 7]     	LD A, (HL)
+0113: CD5402   [24]     	CALL hexout
+0116: DD36002E [43]     	LD (IX), '.'		; set it to dot and we'll overwrite if it's displayable
+011A: FE20     [50]     	CP 20h				; displayable is >$19 and <$7f
+011C: FA2701   [60|60]  	JP M, skip
+011F: FE7F     [67]     	CP 7Fh
+0121: F22701   [77|77]  	JP P, skip
+0124: DD7700   [96]     	LD (IX), A			; replace with the ASCII code otherwise
+0127:                   skip:
+0127: 3E20     [ 7]     	LD A, ' '
+0129: CDBD02   [24]     	CALL outchar
+012C: 23       [30]     	INC HL
+012D: DD23     [40]     	INC IX
+012F: 05       [44]     	DEC B
+0130: 3E00     [51]     	LD A, 0
+0132: B8       [55]     	CP B
+0133: C21201   [65|65]  	JP NZ, loop16
+                        	
+                        	; Output the 8 ASCII chars at BUFFER
+                        	; Add a $80 on the end and use otext routine
+0136: 3E80     [72]     	LD A, 80h
+0138: 320DFF   [85]     	LD (BUFFER+16), A
+013B: 11FDFE   [95]     	LD DE, BUFFER
+013E: CDC902   [112]    	CALL otext
+0141: CDD902   [129]    	CALL OUTCRLF
+                        	
+0144: 79       [133]    	LD A, C				; check if we were only doing one line
+0145: FEFF     [140]    	CP $FF
+0147: CA2C00   [150|150]	JP Z, display		; C was $FF so stop at one cycle
+                        	
+014A: CDB002   [167]    	CALL chkchar		; check if a key was pressed
+014D: FEFF     [174]    	CP $FF
+014F: C22C00   [184|184]	JP NZ, display		; a keypress: abort
+                        	
+0152: C3FC00   [194]    	JP dump
+                        	
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; COPY from, to, length (all in hex)
+                        ;;    use BUFFER to store 'to' and 'from'
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+0155:                   copy:
+0155: E5       [11]     	PUSH HL
+0156: D5       [22]     	PUSH DE
+0157: C5       [33]     	PUSH BC
+0158: 117104   [43]     	LD DE, CPTXT1	; Copy: From
+015B: CDC902   [60]     	CALL otext
+                        	
+015E: 3E30     [67]     	LD A, $30		; start fourcar with [0000]
+0160: CD9701   [84]     	CALL fourcar
+0163: 22FDFE   [100]    	LD (BUFFER), HL
+0166: 117C04   [110]    	LD DE, CPTXT2	; To:
+0169: CDC902   [127]    	CALL otext
+016C: 3E30     [134]    	LD A, $30		; start fourcar with [0000]
+016E: CD9701   [151]    	CALL fourcar
+0171: 22FFFE   [167]    	LD (BUFFER+2), HL
+0174: 118004   [177]    	LD DE, CPTXT3	; Length:
+0177: CDC902   [194]    	CALL otext
+017A: 3E30     [201]    	LD A, $30		; start fourcar with [0000]
+017C: CD9701   [218]    	CALL fourcar
+017F: 444D     [226]    	LD BC, HL		; set up for eLDIR
+0181: ED5BFFFE [246]    	LD DE, (BUFFER+2)
+0185: 2AFDFE   [262]    	LD HL, (BUFFER)
+0188: CD8602   [279]    	CALL eLDIR
+                        	
+018B: 118804   [289]    	LD DE, DONETXT	; Done
+018E: CDC902   [306]    	CALL otext
+0191: C1       [316]    	POP BC
+0192: D1       [326]    	POP DE
+0193: E1       [336]    	POP HL
+0194: C32C00   [346]    	JP display
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; Four hex digit rotating input starting with contents of A
+                        ;;   exits on <ret> or <esc>
+                        ;;   HL contains the address input on return
+                        ;;   or HL remains unchanged on abort
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+0197:                   fourcar:
+0197: F5       [11]     		PUSH AF
+0198: C5       [22]     		PUSH BC
+0199: 444D     [30]     		LD BC, HL		; save original HL
+                        		; First set HL to [000(digit)] to display
+019B: CD7E02   [47]     		CALL ATOHEX
+019E: 6F       [51]     		LD L, A
+019F: 2600     [58]     		LD H, 00h
+01A1: 32FDFF   [71]     		LD (KDATA2), A	; start with the digit we were given
+01A4: 3E00     [78]     		LD A, 0
+01A6: 32FEFF   [91]     		LD (KDATA1), A
+                        		; Output [nnnn] then one backspace
+01A9: CD4102   [108]    		CALL dispadd
+01AC: 3E08     [115]    		LD A, A_BS
+01AE: CDBD02   [132]    		CALL outchar
+01B1:                   fcloop:
+                        		; Output 4 backspaces
+01B1: 3E08     [ 7]     		LD A, A_BS
+01B3: CDBD02   [24]     		CALL outchar
+01B6: CDBD02   [41]     		CALL outchar
+01B9: CDBD02   [58]     		CALL outchar
+01BC: CDBD02   [75]     		CALL outchar
+                        		
+01BF: CDA602   [92]     		CALL inchar
+01C2: FE0D     [99]     		CP A_CR			; <return>: end
+01C4: CAED01   [109|109]		JP Z, fcend
+01C7: FE1B     [116]    		CP A_ESC		; <escape>: abort
+01C9: C2D101   [126|126]		JP NZ, fccont
+01CC: 6069     [134]    		LD HL, BC		; Abort - restore old value
+01CE: C3F001   [144]    		JP fcabort
+01D1: CD7E02   [17]     fccont:	CALL ATOHEX
+01D4: 21FDFF   [27]     		LD HL, KDATA2
+01D7: ED6F     [45]     		RLD
+01D9: 21FEFF   [55]     		LD HL, KDATA1
+01DC: ED6F     [73]     		RLD
+01DE: 3AFEFF   [86]     		LD A, (KDATA1)
+01E1: CD5402   [103]    		CALL hexout
+01E4: 3AFDFF   [116]    		LD A, (KDATA2)
+01E7: CD5402   [133]    		CALL hexout
+01EA: C3B101   [143]    		JP fcloop
+                        		
+01ED: 2AFDFF   [16]     fcend:	LD HL, (KDATA2)		;Loads L then H
+01F0:                   fcabort:
+01F0: CDD902   [17]     		CALL OUTCRLF
+01F3: C1       [27]     		POP BC
+01F4: F1       [37]     		POP AF
+01F5: C9       [47]     		RET	
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; TWO CHARACTER ROLLING INPUT ROUTINE, exits on <esc> or <ret>
+                        ;;   sets (HL) to A and returns
+                        ;;   on <esc> set (HL) to original value, write FF to A and return
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+01F6:                   twocar:
+01F6: E5       [11]     		PUSH HL
+                        		; Output [00] then one backspace
+01F7: 3E5B     [18]     		LD A, '['
+01F9: CDBD02   [35]     		CALL outchar
+01FC: 3E30     [42]     		LD A, '0'
+01FE: CDBD02   [59]     		CALL outchar
+0201: CDBD02   [76]     		CALL outchar
+0204: 3E5D     [83]     		LD A, ']'
+0206: CDBD02   [100]    		CALL outchar
+0209: 3E08     [107]    		LD A, A_BS
+020B: CDBD02   [124]    		CALL outchar
+020E: 46       [131]    		LD B, (HL)		; save the old contents for <esc>
+020F: 21FEFF   [141]    		LD HL, KDATA1
+0212: 3600     [151]    		LD (HL), 0
+0214:                   tcloop:
+                        		; Output 2 backspaces
+0214: 3E08     [ 7]     		LD A, A_BS
+0216: CDBD02   [24]     		CALL outchar
+0219: CDBD02   [41]     		CALL outchar
+                        
+021C: CDA602   [58]     		CALL inchar
+021F: FE0D     [65]     		CP A_CR
+0221: CA3B02   [75|75]  		JP Z, tcend
+0224: FE1B     [82]     		CP A_ESC
+0226: CA3502   [92|92]  		JP Z, tcabort
+                        		
+0229: CD7E02   [109]    		CALL ATOHEX
+022C: ED6F     [127]    		RLD
+022E: 7E       [134]    		LD A, (HL)
+022F: CD5402   [151]    		CALL hexout
+0232: C31402   [161]    		JP tcloop
+                        		
+0235:                   tcabort:
+0235: 78       [ 4]     		LD A, B		; <esc>: so restore A
+0236: 32FEFF   [17]     		LD (KDATA1), A
+0239: 06FF     [24]     		LD B, $FF	; Use $FF in B to indicate an abort
+023B: E1       [10]     tcend:	POP HL
+023C: 3AFEFF   [23]     		LD A, (KDATA1)
+023F: 77       [30]     		LD (HL), A	; set (HL) to KDATA1
+0240: C9       [40]     		RET
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ;; Display '[aaaa]' - address of HL
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+0241:                   dispadd:
+0241: 3E5B     [ 7]     		LD A, '['
+0243: CDBD02   [24]     		CALL outchar
+0246: 7C       [28]     		LD A, H
+0247: CD5402   [45]     		CALL hexout
+024A: 7D       [49]     		LD A, L
+024B: CD5402   [66]     		CALL hexout
+024E: 3E5D     [73]     		LD A, ']'
+0250: CDBD02   [90]     		CALL outchar
+0253: C9       [100]    		RET
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ; OUTPUT VALUE OF A IN HEX ONE NYBBLE AT A TIME
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+0254: C5       [11]     hexout	PUSH BC
+0255: F5       [22]     		PUSH AF
+0256: 47       [26]     		LD B, A
+                        		; Upper nybble
+0257: CB3F     [34]     		SRL A
+0259: CB3F     [42]     		SRL A
+025B: CB3F     [50]     		SRL A
+025D: CB3F     [58]     		SRL A
+025F: CD7102   [75]     		CALL TOHEX
+0262: CDBD02   [92]     		CALL outchar
+                        		
+                        		; Lower nybble
+0265: 78       [96]     		LD A, B
+0266: E60F     [103]    		AND 0FH
+0268: CD7102   [120]    		CALL TOHEX
+026B: CDBD02   [137]    		CALL outchar
+                        		
+026E: F1       [147]    		POP AF
+026F: C1       [157]    		POP BC
+0270: C9       [167]    		RET
+                        		
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ; TRANSLATE value in lower A TO 2 HEX CHAR CODES FOR DISPLAY
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+0271:                   TOHEX:
+0271: E5       [11]     		PUSH HL
+0272: D5       [22]     		PUSH DE
+0273: 1600     [29]     		LD D, 0
+0275: 5F       [33]     		LD E, A
+0276: 210603   [43]     		LD HL, DATA
+0279: 19       [54]     		ADD HL, DE
+027A: 7E       [61]     		LD A, (HL)
+027B: D1       [71]     		POP DE
+027C: E1       [81]     		POP HL
+027D: C9       [91]     		RET
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; 	ASCII char code for 0-9,A-F in A to single hex digit
+                        ;;    subtract $30, if result > 9 then subtract $7 more
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+027E:                   ATOHEX:
+027E: D630     [ 7]     		SUB $30
+0280: FE0A     [14]     		CP 10
+0282: F8       [19|25]  		RET M		; If result negative it was 0-9 so we're done
+0283: D607     [26]     		SUB $7		; otherwise, subtract $7 more to get to $0A-$0F
+0285: C9       [36]     		RET		
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; eLDIR - LDIR but with confirmed writes
+                        ;;   HL=from, DE=to, BC=length
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+0286:                   eLDIR:
+0286: F5       [11]     		PUSH AF
+0287: 78       [ 4]     ldlp:	LD A, B			; test BC for zero first
+0288: B1       [ 8]     		OR C			; stupid z80 doesn't flag after DEC xy
+0289: CA9A02   [18|18]  		JP Z, ldend
+028C: 7E       [25]     		LD A, (HL)
+028D: E5       [36]     		PUSH HL
+028E: 626B     [44]     		LD HL, DE
+0290: CD9C02   [61]     		CALL CONFWR		; uses HL
+0293: E1       [71]     		POP HL
+0294: 23       [77]     		INC HL
+0295: 13       [83]     		INC DE
+0296: 0B       [89]     		DEC BC
+0297: C38702   [99]     		JP ldlp
+029A: F1       [10]     ldend:	POP AF
+029B: C9       [20]     		RET		
+                        		
+                        		
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; CONFWR - Write to address with confirm, returns when complete
+                        ;;          used for writign to EEPROM
+                        ;;  This will hang the computer if write does not succeed
+                        ;; byte to write is in A
+                        ;; address to write is HL
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+029C:                   CONFWR:
+029C: C5       [11]     		PUSH BC
+029D: 47       [15]     		LD B, A
+029E: 77       [22]     		LD (HL), A		; write the byte
+029F: 7E       [ 7]     eeloop:	LD A, (HL)		; read the byte
+02A0: B8       [11]     		CP B			; the EEPROM puts inverse of the value
+02A1: C29F02   [21|21]  		JP NZ, eeloop	; while it is writing
+02A4: C1       [31]     		POP BC
+02A5: C9       [41]     		RET	
+                        		
+                        		
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; Wait until UART has a byte, store it in A
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+02A6:                   inchar:
+02A6: DB85     [11]     		IN A, (UART_LSR)	; read LSR
+02A8: CB47     [19]     		BIT 0, A			; bit 0 is Data Ready
+02AA: CAA602   [29|29]  		JP Z, inchar
+02AD: DB80     [40]     		IN A, (UART_PORT)
+02AF: C9       [50]     		RET
+                        		
+                        		
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; If UART has a byte, store it in A else return $FF
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+02B0:                   chkchar:
+02B0: DB85     [11]     		IN A, (UART_LSR)
+02B2: CB47     [19]     		BIT 0, A			; bit 0 is set when data present
+02B4: C2BA02   [29|29]  		JP NZ, gotchar
+02B7: 3EFF     [36]     		LD A, $FF
+02B9: C9       [46]     		RET
+02BA:                   gotchar:
+02BA: DB80     [11]     		IN A, (UART_PORT)
+02BC: C9       [21]     		RET
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; Output the byte in A to UART, wait until transmitted
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+02BD:                   outchar:
+02BD: F5       [11]     		PUSH AF
+02BE: D380     [22]     		OUT (UART_PORT), A
+                        ; wait until transmitted
+02C0:                   oloop:	
+02C0: DB85     [11]     		IN A, (UART_LSR)	; read LSR
+02C2: CB77     [19]     		BIT 6, A	; bit 6 is transmitter empty
+02C4: CAC002   [29|29]  		JP Z, oloop
+02C7: F1       [39]     		POP AF
+02C8: C9       [49]     		RET
+                        	
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ; Output text pointed to by DE
+                        ;   loop through calling outchar until $80 is encountered
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+02C9:                   otext:
+02C9: F5       [11]     		PUSH AF
+02CA: 1A       [ 7]     otloop:	LD A, (DE)
+02CB: FE80     [14]     		CP A, $80		; $80 means end of text
+02CD: CAD702   [24|24]  		JP Z, otend		
+02D0: CDBD02   [41]     		CALL outchar	; output the byte in A
+02D3: 13       [47]     		INC DE			; point to next
+02D4: C3CA02   [57]     		JP otloop
+02D7: F1       [10]     otend:	POP AF
+02D8: C9       [20]     		RET
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ;; OUTCRLF - output a CR and an LF
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+02D9:                   OUTCRLF:
+02D9: F5       [11]     		PUSH AF
+02DA: 3E0D     [18]     		LD A, A_CR
+02DC: CDBD02   [35]     		CALL outchar
+02DF: 3E0A     [42]     		LD A, A_LF
+02E1: CDBD02   [59]     		CALL outchar
+02E4: F1       [69]     		POP AF
+02E5: C9       [79]     		RET
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ; Toggle LEDs on the UART
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+02E6:                   toggle1:
+02E6: F5       [11]     		PUSH AF
+02E7: DB84     [22]     		IN A,(UART_MCR)
+02E9: EE04     [29]     		XOR UART_O1	; toggle OUT1
+02EB: D384     [40]     		OUT (UART_MCR), A
+02ED: F1       [50]     		POP AF
+02EE: C9       [60]     		RET
+02EF:                   toggle2:
+02EF: F5       [11]     		PUSH AF
+02F0: DB84     [22]     		IN A,(UART_MCR)
+02F2: EE08     [29]     		XOR UART_O2	; toggle OUT2
+02F4: D384     [40]     		OUT (UART_MCR), A
+02F6: F1       [50]     		POP AF
+02F7: C9       [60]     		RET
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+                        ;; Turn on or off LED 1
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+02F8:                   on1:
+02F8: F5       [11]     		PUSH AF
+02F9: 3E01     [18]     		LD A, 1
+02FB: D384     [29]     		OUT (UART_MCR), A
+02FD: F1       [39]     		POP AF
+02FE: C9       [49]     		RET
+02FF:                   off1:	
+02FF: F5       [11]     		PUSH AF
+0300: 3E00     [18]     		LD A, 0
+0302: D384     [29]     		OUT (UART_MCR), A
+0304: F1       [39]     		POP AF
+0305: C9       [49]     		RET
+                        
+                        
+0306:                   DATA:
+0306: 30                		DEFB	30h	; 0
+0307: 31                		DEFB	31h	; 1
+0308: 32                		DEFB	32h	; 2
+0309: 33                		DEFB	33h	; 3
+030A: 34                		DEFB	34h	; 4
+030B: 35                		DEFB	35h	; 5
+030C: 36                		DEFB	36h	; 6
+030D: 37                		DEFB	37h	; 7
+030E: 38                		DEFB	38h	; 8
+030F: 39                		DEFB	39h	; 9
+0310: 41                		DEFB	41h	; A
+0311: 42                		DEFB	42h	; B
+0312: 43                		DEFB	43h	; C
+0313: 44                		DEFB	44h	; D
+0314: 45                		DEFB	45h	; E
+0315: 46                		DEFB	46h	; F
+                        	
+0316:                   TEXT0:
+0316: 4D6F6E20          	DEFM	"Mon $Revision: 1.17 $",$0A,$0D
+031A: 24526576          
+031E: 6973696F          
+0322: 6E3A2031          
+0326: 2E313720          
+032A: 240A0D            
+032D: 3C737063          	DEFM	"<spc>: display address",$0A,$0D
+0331: 3E3A2064          
+0335: 6973706C          
+0339: 61792061          
+033D: 64647265          
+0341: 73730A0D          
+0345: 5B302D39          	DEFM	"[0-9A-F]: enter address (<esc> abort)",$0A,$0D
+0349: 412D465D          
+034D: 3A20656E          
+0351: 74657220          
+0355: 61646472          
+0359: 65737320          
+035D: 283C6573          
+0361: 633E2061          
+0365: 626F7274          
+0369: 290A0D            
+036C: 3C656E74          	DEFM	"<ent>: inc address, <bs>:dec address",$0A,$0D
+0370: 3E3A2069          
+0374: 6E632061          
+0378: 64647265          
+037C: 73732C20          
+0380: 3C62733E          
+0384: 3A646563          
+0388: 20616464          
+038C: 72657373          
+0390: 0A0D              
+0392: 6C3A206C          	DEFM	"l: list+inc 16",$0A,$0D
+0396: 6973742B          
+039A: 696E6320          
+039E: 31360A0D          
+03A2: 643A2064          	DEFM	"d: dump at address (any key ends)",$0A,$0D
+03A6: 756D7020          
+03AA: 61742061          
+03AE: 64647265          
+03B2: 73732028          
+03B6: 616E7920          
+03BA: 6B657920          
+03BE: 656E6473          
+03C2: 290A0D            
+03C5: 533A2073          	DEFM	"S: set at address (<ent>:set+inc <esc>:end)",$0A,$0D
+03C9: 65742061          
+03CD: 74206164          
+03D1: 64726573          
+03D5: 7320283C          
+03D9: 656E743E          
+03DD: 3A736574          
+03E1: 2B696E63          
+03E5: 203C6573          
+03E9: 633E3A65          
+03ED: 6E64290A          
+03F1: 0D                
+03F2: 583A2065          	DEFM	"X: exec address (caution!)",$0A,$0D
+03F6: 78656320          
+03FA: 61646472          
+03FE: 65737320          
+0402: 28636175          
+0406: 74696F6E          
+040A: 21290A0D          
+040E: 633A2063          	DEFM	"c: copy... (length=0 to abort)",$0A,$0D
+0412: 6F70792E          
+0416: 2E2E2028          
+041A: 6C656E67          
+041E: 74683D30          
+0422: 20746F20          
+0426: 61626F72          
+042A: 74290A0D          
+042E: 6B3A2062          	DEFM	"k: bulk set...",$0A,$0D
+0432: 756C6B20          
+0436: 7365742E          
+043A: 2E2E0A0D          
+043E: 743A2074          	DEFM	"t: type ascii to mem...",$0A,$0D
+0442: 79706520          
+0446: 61736369          
+044A: 6920746F          
+044E: 206D656D          
+0452: 2E2E2E0A          
+0456: 0D                
+0457: 683A2074          	DEFM	"h: this help",$0A,$0D
+045B: 68697320          
+045F: 68656C70          
+0463: 0A0D              
+0465: 80                	DEFB	$80
+                        
+0466:                   SETTXT:
+0466: 53455420          	DEFM	"SET ",$80
+046A: 80                
+                        	
+046B:                   EXTXT:
+046B: 65786563          	DEFM	"exec ",$80
+046F: 2080              
+                        	
+0471:                   CPTXT1:
+0471: 636F7079          	DEFM	"copy from:",$80
+0475: 2066726F          
+0479: 6D3A80            
+047C:                   CPTXT2:
+047C: 746F3A80          	DEFM	"to:", $80
+0480:                   CPTXT3:
+0480: 6C656E67          	DEFM	"length:",$80
+0484: 74683A80          
+                        
+0488:                   DONETXT:
+0488: 446F6E65          	DEFM	"Done.",$0A,$0D,$80
+048C: 2E0A0D80          
+                        	
+                        
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;; Additional routines
+                        ;; April 2015
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        
+                        ;; Call address in HL
+                        ;; Works by putting 'display' on the stack
+                        ;; destroys DE
+0490:                   callhl:
+0490: 116B04   [10]     	LD DE, EXTXT	; confirmation text
+0493: CDC902   [27]     	CALL otext
+0496: CD4102   [44]     	CALL dispadd
+0499: CDD902   [61]     	CALL OUTCRLF
+049C: CDA602   [78]     	CALL inchar
+049F: FE0D     [85]     	CP A_CR			; <ret> we continue, else abort
+04A1: C2F700   [95|95]  	JP NZ, xabort	; xabort jumps to display
+                        	
+04A4: 112C00   [105]    	LD DE, display
+04A7: D5       [116]    	PUSH DE
+04A8: E5       [127]    	PUSH HL
+04A9: C9       [137]    	RET
+                        
+                        
+                        ;; Bulk memory set, continuous entry
+                        ;; designed to take paste from clipboard
+                        ;; of continual hex stream
+                        ;; starts from HL until <esc>
+04AA:                   bulkset:
+04AA: D5       [11]     	PUSH DE
+04AB: 11E204   [21]     	LD DE, bstxt
+04AE: CDC902   [38]     	CALL otext
+                        	
+                        	; ask for address -> HL
+04B1: AF       [42]     	XOR A
+04B2: CD9701   [59]     	CALL fourcar
+                        	
+04B5: 11F104   [69]     	LD DE, bstxt1
+04B8: CDC902   [86]     	CALL otext
+                        	
+04BB:                   bkdigit:	
+                        	; Digit 1
+04BB: CDA602   [17]     	CALL inchar
+04BE: FE1B     [24]     	CP A_ESC
+04C0: 2816     [31|36]  	JR Z, bsabort
+04C2: CDBD02   [48]     	CALL outchar	; echo the character
+04C5: CD7E02   [65]     	CALL ATOHEX		; convert to binary
+04C8: ED6F     [83]     	RLD				; move into (HL) lower nybble
+                        
+                        	; Digit 2
+04CA: CDA602   [100]    	CALL inchar
+04CD: CDBD02   [117]    	CALL outchar	; echo the character
+04D0: CD7E02   [134]    	CALL ATOHEX		; convert to binary
+04D3: ED6F     [152]    	RLD				; shift (HL) and move into lower nybble
+                        	
+04D5: 23       [158]    	INC HL
+04D6: 18E3     [170]    	JR 	bkdigit
+                        	
+04D8:                   bsabort:
+04D8: 118804   [10]     	LD DE, DONETXT
+04DB: CDC902   [27]     	CALL otext
+04DE: D1       [37]     	POP DE
+04DF: C32C00   [47]     	JP	display
+04E2:                   bstxt:
+04E2: 42756C6B          	DEFM "Bulk load to: ",$80
+04E6: 206C6F61          
+04EA: 6420746F          
+04EE: 3A2080            
+04F1:                   bstxt1:
+04F1: 52656164          	DEFM "Ready (<esc> to end): ",$80
+04F5: 7920283C          
+04F9: 6573633E          
+04FD: 20746F20          
+0501: 656E6429          
+0505: 3A2080            
+                        	
+                        	
+                        ;; Type ascii values to memory, <esc> exits
+0508:                   typemem:
+0508: D5       [11]     	PUSH DE
+0509: 112B05   [21]     	LD DE, tmtxt
+050C: CDC902   [38]     	CALL otext
+                        
+                        	; ask for address -> HL
+050F: AF       [42]     	XOR A			; zero A as first digit of fourchar
+0510: CD9701   [59]     	CALL fourcar	; set HL as per user entry
+                        
+0513: 11F104   [69]     	LD DE, bstxt1
+0516: CDC902   [86]     	CALL otext
+                        
+0519:                   tmloop:
+0519: CDA602   [17]     	CALL inchar
+051C: 77       [24]     	LD (HL), A
+051D: 23       [30]     	INC HL
+051E: CDBD02   [47]     	CALL outchar
+0521: FE1B     [54]     	CP A_ESC		; escape
+0523: 20F4     [61|66]  	JR NZ, tmloop
+                        
+0525: 626B     [69]     	LD HL, DE
+0527: D1       [79]     	POP DE
+0528: C32C00   [89]     	JP display
+052B:                   tmtxt:
+052B: 54797065          	DEFM "Type ascii to: ",$80
+052F: 20617363          
+0533: 69692074          
+0537: 6F3A2080          
+                        	
+                        
+                        ;; Set memory range to value in A
+                        ;; From HL, length in BC
+053B:                   SETMEM:
+053B: D5       [11]     	PUSH DE
+053C: 57       [15]     	LD D, A
+053D:                   smloop:
+053D: 78       [ 4]     	LD A, B		; Test BC for zero first
+053E: B1       [ 8]     	OR C
+053F: 2808     [15|20]  	JR Z, smend		
+0541: 7A       [19]     	LD A, D
+0542: CD9C02   [36]     	CALL CONFWR
+0545: 23       [42]     	INC HL
+0546: 0B       [48]     	DEC BC
+0547: 18F4     [60]     	JR smloop
+0549:                   smend:	
+0549: 118804   [10]     	LD DE, DONETXT
+054C: CDC902   [27]     	CALL otext
+054F: D1       [37]     	POP DE
+0550: C32C00   [47]     	JP display
+                        
+0553: 46696E2E          txt:	DEFM "Fin.",$0D,$0A,$80
+0557: 0D0A80            
 
-Error in file: z80UARTMonitor.asm  Line: 308
-illegal operand
 
-Error in file: z80UARTMonitor.asm  Line: 333
-illegal operand
+; +++ segments +++
 
-Error in file: z80UARTMonitor.asm  Line: 475
-illegal operand
+#CODE :        start=0     len=1370 
 
-Error in file: z80UARTMonitor.asm  Line: 622
-missing string separator
+; +++ global symbols +++
 
-Error in file: z80UARTMonitor.asm  Line: 623
-missing string separator
+ATOHEX    = $027E =    638          z80UARTMonitor.asm:457
+A_BS      = $0008 =      8          z80UARTMonitor.asm:40
+A_CR      = $000D =     13          z80UARTMonitor.asm:38
+A_DEL     = $007F =    127          z80UARTMonitor.asm:43
+A_ESC     = $001B =     27          z80UARTMonitor.asm:42
+A_FF      = $000C =     12          z80UARTMonitor.asm:41 (unused)
+A_LF      = $000A =     10          z80UARTMonitor.asm:39
+BUFFER    = $FEFD =  65277          z80UARTMonitor.asm:49
+CONFWR    = $029C =    668          z80UARTMonitor.asm:493
+CPTXT1    = $0471 =   1137          z80UARTMonitor.asm:642
+CPTXT2    = $047C =   1148          z80UARTMonitor.asm:644
+CPTXT3    = $0480 =   1152          z80UARTMonitor.asm:646
+DATA      = $0306 =    774          z80UARTMonitor.asm:603
+DONETXT   = $0488 =   1160          z80UARTMonitor.asm:649
+EXTXT     = $046B =   1131          z80UARTMonitor.asm:639
+KDATA1    = $FFFE =  65534          z80UARTMonitor.asm:47
+KDATA2    = $FFFD =  65533          z80UARTMonitor.asm:48
+L1        = $0068 =    104          z80UARTMonitor.asm:126
+L2        = $0071 =    113          z80UARTMonitor.asm:130
+OUTCRLF   = $02D9 =    729          z80UARTMonitor.asm:560
+RAMTOP    = $FFFF =  65535          z80UARTMonitor.asm:45
+SETMEM    = $053B =   1339          z80UARTMonitor.asm:751 (unused)
+SETTXT    = $0466 =   1126          z80UARTMonitor.asm:636
+STACK     = $FEFC =  65276          z80UARTMonitor.asm:50
+T1        = $00AB =    171          z80UARTMonitor.asm:153
+TEMP      = $FFFF =  65535          z80UARTMonitor.asm:46
+TEXT0     = $0316 =    790          z80UARTMonitor.asm:621
+TOHEX     = $0271 =    625          z80UARTMonitor.asm:441
+UART_DLL  = $0080 =    128          z80UARTMonitor.asm:27
+UART_DLM  = $0081 =    129          z80UARTMonitor.asm:28
+UART_FCR  = $0082 =    130          z80UARTMonitor.asm:29
+UART_IER  = $0081 =    129          z80UARTMonitor.asm:30
+UART_LCR  = $0083 =    131          z80UARTMonitor.asm:31
+UART_LSR  = $0085 =    133          z80UARTMonitor.asm:33
+UART_MCR  = $0084 =    132          z80UARTMonitor.asm:32
+UART_O1   = $0004 =      4          z80UARTMonitor.asm:35
+UART_O2   = $0008 =      8          z80UARTMonitor.asm:36
+UART_PORT = $0080 =    128          z80UARTMonitor.asm:26
+bkdigit   = $04BB =   1211          z80UARTMonitor.asm:692
+bsabort   = $04D8 =   1240          z80UARTMonitor.asm:710
+bstxt     = $04E2 =   1250          z80UARTMonitor.asm:715
+bstxt1    = $04F1 =   1265          z80UARTMonitor.asm:717
+bulkset   = $04AA =   1194          z80UARTMonitor.asm:680
+callhl    = $0490 =   1168          z80UARTMonitor.asm:661 (unused)
+chkchar   = $02B0 =    688          z80UARTMonitor.asm:518
+copy      = $0155 =    341          z80UARTMonitor.asm:268
+digit     = $00AF =    175          z80UARTMonitor.asm:155
+dispadd   = $0241 =    577          z80UARTMonitor.asm:403
+display   = $002C =     44          z80UARTMonitor.asm:94
+dump      = $00FC =    252          z80UARTMonitor.asm:215
+eLDIR     = $0286 =    646          z80UARTMonitor.asm:468
+eeloop    = $029F =    671          z80UARTMonitor.asm:497
+exec      = $00E1 =    225          z80UARTMonitor.asm:192
+fcabort   = $01F0 =    496          z80UARTMonitor.asm:347
+fccont    = $01D1 =    465          z80UARTMonitor.asm:335
+fcend     = $01ED =    493          z80UARTMonitor.asm:346
+fcloop    = $01B1 =    433          z80UARTMonitor.asm:320
+fourcar   = $0197 =    407          z80UARTMonitor.asm:305
+gotchar   = $02BA =    698          z80UARTMonitor.asm:524
+hexout    = $0254 =    596          z80UARTMonitor.asm:417
+inchar    = $02A6 =    678          z80UARTMonitor.asm:507
+init      = $0003 =      3          z80UARTMonitor.asm:56 (unused)
+inloop    = $0054 =     84          z80UARTMonitor.asm:113 (unused)
+ldend     = $029A =    666          z80UARTMonitor.asm:482
+ldlp      = $0287 =    647          z80UARTMonitor.asm:470
+list      = $00FA =    250          z80UARTMonitor.asm:209
+loop16    = $0112 =    274          z80UARTMonitor.asm:227
+notdig    = $00B5 =    181          z80UARTMonitor.asm:158
+off1      = $02FF =    767          z80UARTMonitor.asm:595 (unused)
+oloop     = $02C0 =    704          z80UARTMonitor.asm:535
+on1       = $02F8 =    760          z80UARTMonitor.asm:589
+otend     = $02D7 =    727          z80UARTMonitor.asm:554
+otext     = $02C9 =    713          z80UARTMonitor.asm:546
+otloop    = $02CA =    714          z80UARTMonitor.asm:548
+outchar   = $02BD =    701          z80UARTMonitor.asm:531
+set       = $00C0 =    192          z80UARTMonitor.asm:171
+setend    = $00DD =    221          z80UARTMonitor.asm:184
+skip      = $0127 =    295          z80UARTMonitor.asm:236
+smend     = $0549 =   1353          z80UARTMonitor.asm:763
+smloop    = $053D =   1341          z80UARTMonitor.asm:754
+start     = $0026 =     38          z80UARTMonitor.asm:88
+tcabort   = $0235 =    565          z80UARTMonitor.asm:391
+tcend     = $023B =    571          z80UARTMonitor.asm:395
+tcloop    = $0214 =    532          z80UARTMonitor.asm:373
+tmloop    = $0519 =   1305          z80UARTMonitor.asm:734
+tmtxt     = $052B =   1323          z80UARTMonitor.asm:745
+toggle1   = $02E6 =    742          z80UARTMonitor.asm:572 (unused)
+toggle2   = $02EF =    751          z80UARTMonitor.asm:579 (unused)
+twocar    = $01F6 =    502          z80UARTMonitor.asm:358
+txt       = $0553 =   1363          z80UARTMonitor.asm:769 (unused)
+typemem   = $0508 =   1288          z80UARTMonitor.asm:722
+xabort    = $00F7 =    247          z80UARTMonitor.asm:203
 
-Error in file: z80UARTMonitor.asm  Line: 624
-missing string separator
 
-Error in file: z80UARTMonitor.asm  Line: 625
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 626
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 627
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 628
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 629
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 630
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 631
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 632
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 633
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 634
-undefined symbol
-
-Error in file: z80UARTMonitor.asm  Line: 637
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 640
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 643
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 645
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 647
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 650
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 716
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 718
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 742
-illegal operand
-
-Error in file: z80UARTMonitor.asm  Line: 746
-missing string separator
-
-Error in file: z80UARTMonitor.asm  Line: 769
-missing string separator
-
+total time: 0.0363 sec.
+no errors
