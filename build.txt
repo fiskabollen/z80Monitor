@@ -1,0 +1,4 @@
+Use zasm from z80pack:
+https://www.autometer.de/unix4fun/z80pack/
+
+zasm -uwy --z80 z80UARTMonitor.asm
